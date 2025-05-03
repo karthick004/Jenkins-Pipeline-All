@@ -34,6 +34,20 @@ pipeline {
             }
         }
 
+        stage('Install kubectl') {
+            steps {
+                script {
+                    echo 'Installing kubectl...'
+                    sh """
+                        curl -LO https://dl.k8s.io/release/v1.26.1/bin/linux/amd64/kubectl
+                        chmod +x ./kubectl
+                        mv ./kubectl /usr/local/bin/kubectl
+                        kubectl version --client
+                    """
+                }
+            }
+        }
+
         stage('Checkout Code') {
             steps {
                 withCredentials([usernamePassword(credentialsId: 'github-creds', usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
@@ -112,19 +126,6 @@ pipeline {
                 withCredentials([aws(credentialsId: 'aws-creds', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
                     dir('terraformmodules') {
                         sh 'terraform apply -input=false -auto-approve tfplan'
-                    }
-                }
-            }
-        }
-
-        stage('Terraform Output') {
-            steps {
-                dir('terraformmodules') {
-                    script {
-                        sh 'terraform output -json > outputs.json'
-                        archiveArtifacts artifacts: 'outputs.json'
-                        def outputs = readJSON file: 'outputs.json'
-                        echo "Cluster Endpoint: ${outputs.cluster_endpoint?.value}"
                     }
                 }
             }
