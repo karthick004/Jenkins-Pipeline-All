@@ -1,0 +1,109 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_REGION = 'us-east-1'
+        TF_VAR_aws_region = "${AWS_REGION}" // Used by Terraform
+        LOCAL_BIN = "${WORKSPACE}/.local/bin"
+        PATH = "${LOCAL_BIN}:${env.PATH}"
+        TF_BACKEND_BUCKET = 'my-state-file-bucket-1233'
+        TF_BACKEND_KEY = 'envs/prod/terraform.tfstate'
+    }
+
+    stages {
+        stage('Prepare Workspace') {
+            steps {
+                cleanWs()
+                sh 'mkdir -p ${LOCAL_BIN}'
+            }
+        }
+
+        stage('Install Terraform') {
+            steps {
+                script {
+                    def tfInstalled = sh(script: "if [ -x '${LOCAL_BIN}/terraform' ]; then exit 0; else exit 1; fi", returnStatus: true)
+                    if (tfInstalled != 0) {
+                        echo 'Installing Terraform 1.5.0...'
+                        sh """
+                            curl -fsSL https://releases.hashicorp.com/terraform/1.5.0/terraform_1.5.0_linux_amd64.zip -o terraform.zip
+                            unzip -o terraform.zip -d ${LOCAL_BIN}
+                            rm -f terraform.zip
+                            chmod +x ${LOCAL_BIN}/terraform
+                        """
+                    }
+                    sh "${LOCAL_BIN}/terraform -version"
+                }
+            }
+        }
+
+        stage('Checkout Code') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'github-creds', usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
+                    sh """
+                        rm -rf terraformmodules || true
+                        git clone -b submain2 --depth 1 https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/CloudMasa-Tech/terraformmodules.git
+                        cd terraformmodules && git rev-parse HEAD > ../git-commit.txt
+                    """
+                }
+            }
+        }
+
+        stage('Terraform Init') {
+            steps {
+                withCredentials([aws(credentialsId: 'aws-creds', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+                    dir('terraformmodules') {
+                        sh """
+                            terraform init -input=false -upgrade \
+                                -backend-config="bucket=${TF_BACKEND_BUCKET}" \
+                                -backend-config="key=${TF_BACKEND_KEY}" \
+                                -backend-config="region=${AWS_REGION}" \
+                                -backend-config="encrypt=true"
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Terraform Destroy Plan') {
+            steps {
+                withCredentials([aws(credentialsId: 'aws-creds', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+                    dir('terraformmodules') {
+                        sh """
+                            terraform plan -destroy -input=false -var="aws_region=${AWS_REGION}" -detailed-exitcode || true
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Manual Approval to Destroy') {
+            steps {
+                timeout(time: 30, unit: 'MINUTES') {
+                    input(message: 'Proceed with Terraform destroy?', ok: 'Destroy', submitter: 'admin,terraform')
+                }
+            }
+        }
+
+        stage('Terraform Destroy Apply') {
+            steps {
+                withCredentials([aws(credentialsId: 'aws-creds', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+                    dir('terraformmodules') {
+                        sh 'terraform destroy -auto-approve'
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Terraform destroy successful!"
+        }
+        failure {
+            echo "❌ Terraform destroy failed!"
+        }
+        cleanup {
+            echo "🧹 Destroy pipeline completed - cleaning up"
+        }
+    }
+}
